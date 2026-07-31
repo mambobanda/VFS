@@ -27,3 +27,9 @@ private:
 };
 
 } // namespace vfs
+
+// Path is a lightweight utility for dealing with VFS-style paths
+// (POSIX-like '/' separators). It's intentionally simple — it does
+// not attempt to mirror std::filesystem::path but provides the small
+// operations needed by the VFS (components, filename, parent, join,
+// extension). Paths are treated as absolute when beginning with '/'.

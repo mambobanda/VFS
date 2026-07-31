@@ -18,3 +18,10 @@ public:
 };
 
 } // namespace vfs
+
+// XObject is an abstract interface used by XObjectFile to contain
+// arbitrary user-defined serializable objects. The VFS only requires
+// two operations: produce a byte stream (getByteStream) and initialize
+// from a byte stream (initializeObject). clone() is used to support
+// copying XObjectFile instances without exposing concrete types.
+

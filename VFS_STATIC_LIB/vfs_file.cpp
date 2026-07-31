@@ -1,18 +1,82 @@
 #include "vfs_file.hpp"
+#include <stdexcept>
 
 namespace vfs {
 
-    inline void write_string(std::ostream& out, const std::string& s) {
-        std::uint32_t len = static_cast<std::uint32_t>(s.size());
-        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-        out.write(s.data(), len);
+    // ---- Binary I/O helpers -------------------------------------------------
+    // The VFS uses a compact binary format. These helpers centralize
+    // little-endian integer encoding and checked reads/writes. They
+    // throw std::runtime_error on failure which allows higher-level
+    // functions to abort and return an error result instead of
+    // continuing with partially-read data.
+
+    void write_u8(std::ostream& out, std::uint8_t v) {
+        out.put(static_cast<char>(v));
+        if (!out) throw std::runtime_error("I/O write error (u8)");
     }
 
-    inline void read_string(std::istream& in, std::string& s) {
+    void read_u8(std::istream& in, std::uint8_t& v) {
+        int ch = in.get();
+        if (ch == EOF) throw std::runtime_error("I/O read error (u8)");
+        v = static_cast<std::uint8_t>(ch);
+    }
+
+    void write_u32_le(std::ostream& out, std::uint32_t v) {
+        unsigned char b[4] = {
+            static_cast<unsigned char>(v & 0xFFu),
+            static_cast<unsigned char>((v >> 8) & 0xFFu),
+            static_cast<unsigned char>((v >> 16) & 0xFFu),
+            static_cast<unsigned char>((v >> 24) & 0xFFu)
+        };
+        out.write(reinterpret_cast<const char*>(b), 4);
+        if (!out) throw std::runtime_error("I/O write error (u32)");
+    }
+
+    void read_u32_le(std::istream& in, std::uint32_t& v) {
+        unsigned char b[4];
+        in.read(reinterpret_cast<char*>(b), 4);
+        if (!in) throw std::runtime_error("I/O read error (u32)");
+        v = static_cast<std::uint32_t>(b[0]) |
+            (static_cast<std::uint32_t>(b[1]) << 8) |
+            (static_cast<std::uint32_t>(b[2]) << 16) |
+            (static_cast<std::uint32_t>(b[3]) << 24);
+    }
+
+    void write_u64_le(std::ostream& out, std::uint64_t v) {
+        unsigned char b[8];
+        for (int i = 0; i < 8; ++i) b[i] = static_cast<unsigned char>((v >> (8 * i)) & 0xFFu);
+        out.write(reinterpret_cast<const char*>(b), 8);
+        if (!out) throw std::runtime_error("I/O write error (u64)");
+    }
+
+    void read_u64_le(std::istream& in, std::uint64_t& v) {
+        unsigned char b[8];
+        in.read(reinterpret_cast<char*>(b), 8);
+        if (!in) throw std::runtime_error("I/O read error (u64)");
+        v = 0;
+        for (int i = 0; i < 8; ++i) v |= (static_cast<std::uint64_t>(b[i]) << (8 * i));
+    }
+
+    // Strings are encoded as a 32-bit little-endian length followed by
+    // raw bytes. We validate I/O after each operation and throw on
+    // failure to allow callers to abort cleanly.
+    void write_string(std::ostream& out, const std::string& s) {
+        std::uint32_t len = static_cast<std::uint32_t>(s.size());
+        write_u32_le(out, len);
+        if (len > 0) {
+            out.write(s.data(), len);
+            if (!out) throw std::runtime_error("I/O write error (string data)");
+        }
+    }
+
+    void read_string(std::istream& in, std::string& s) {
         std::uint32_t len{};
-        in.read(reinterpret_cast<char*>(&len), sizeof(len));
+        read_u32_le(in, len);
         s.resize(len);
-        in.read(s.data(), len);
+        if (len > 0) {
+            in.read(s.data(), len);
+            if (!in) throw std::runtime_error("I/O read error (string data)");
+        }
     }
 
 
@@ -39,6 +103,9 @@ namespace vfs {
     void MemoryFile::set_data(std::vector<std::byte> d) { _data = std::move(d); }
     const std::vector<std::byte>& MemoryFile::data() const { return _data; }
 
+    // MemoryFile serialization
+    // Format: [name][fullPath][relativePath][type:u8][resKind:u8][dataLen:u32][data]
+    // The write helpers validate I/O and throw on failure.
     void MemoryFile::serialize(std::ostream& out) const {
         write_string(out, _name);
         write_string(out, _fullPath);
@@ -47,14 +114,15 @@ namespace vfs {
         std::uint8_t typeVal = static_cast<std::uint8_t>(_type);
         std::uint8_t resVal = static_cast<std::uint8_t>(_resourceKind);
 
-        out.write(reinterpret_cast<const char*>(&typeVal), sizeof(typeVal));
-        out.write(reinterpret_cast<const char*>(&resVal), sizeof(resVal));
+        write_u8(out, typeVal);
+        write_u8(out, resVal);
 
         std::uint32_t len = static_cast<std::uint32_t>(_data.size());
-        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        write_u32_le(out, len);
 
         if (len > 0) {
             out.write(reinterpret_cast<const char*>(_data.data()), len);
+            if (!out) throw std::runtime_error("I/O write error (memory data)");
         }
     }
 
@@ -65,19 +133,20 @@ namespace vfs {
 
         std::uint8_t typeVal{};
         std::uint8_t resVal{};
-        in.read(reinterpret_cast<char*>(&typeVal), sizeof(typeVal));
-        in.read(reinterpret_cast<char*>(&resVal), sizeof(resVal));
+        read_u8(in, typeVal);
+        read_u8(in, resVal);
 
         _type = static_cast<FileType>(typeVal);
         _resourceKind = static_cast<ResourceKind>(resVal);
 
         std::uint32_t len{};
-        in.read(reinterpret_cast<char*>(&len), sizeof(len));
+        read_u32_le(in, len);
 
         _data.resize(len);
 
         if (len > 0) {
             in.read(reinterpret_cast<char*>(_data.data()), len);
+            if (!in) throw std::runtime_error("I/O read error (memory data)");
         }
     }
 
@@ -112,14 +181,18 @@ namespace vfs {
     const std::string& ExternalFile::external_vfs_file() const { return _externalVfsFile; }
 
     void ExternalFile::serialize(std::ostream& out) const  {
+        // ExternalFile serialization stores the path information that
+        // points to the host filesystem resource. External files are
+        // not embedded in the VFS; instead the VFS keeps a reference
+        // so callers can resolve where to find the real data.
         write_string(out, _name);
         write_string(out, _fullPath);
         write_string(out, _relativePath);
 
         std::uint8_t typeVal = static_cast<std::uint8_t>(_type);
         std::uint8_t resVal = static_cast<std::uint8_t>(_resourceKind);
-        out.write(reinterpret_cast<const char*>(&typeVal), sizeof(typeVal));
-        out.write(reinterpret_cast<const char*>(&resVal), sizeof(resVal));
+        write_u8(out, typeVal);
+        write_u8(out, resVal);
 
         write_string(out, _externalPath);
         write_string(out, _externalVfsPath);
@@ -133,8 +206,8 @@ namespace vfs {
 
         std::uint8_t typeVal{};
         std::uint8_t resVal{};
-        in.read(reinterpret_cast<char*>(&typeVal), sizeof(typeVal));
-        in.read(reinterpret_cast<char*>(&resVal), sizeof(resVal));
+        read_u8(in, typeVal);
+        read_u8(in, resVal);
         _type = static_cast<FileType>(typeVal);
         _resourceKind = static_cast<ResourceKind>(resVal);
 
@@ -180,6 +253,9 @@ namespace vfs {
     }
 
     void XObjectFile::serialize(std::ostream& out) const {
+        // XObjectFile stores a serialized blob representing an XObject.
+        // If an in-memory object exists we ask it for its byte stream,
+        // otherwise we write the raw bytes that were previously stored.
         write_string(out, _name);
         write_string(out, _fullPath);
         write_string(out, _relativePath);
@@ -187,39 +263,44 @@ namespace vfs {
         std::uint8_t typeVal = static_cast<std::uint8_t>(_type);
         std::uint8_t resVal = static_cast<std::uint8_t>(_resourceKind);
 
-        out.write(reinterpret_cast<const char*>(&typeVal), sizeof(typeVal));
-        out.write(reinterpret_cast<const char*>(&resVal), sizeof(resVal));
+        // Use the checked helpers so failures throw consistently.
+        write_u8(out, typeVal);
+        write_u8(out, resVal);
 
         std::vector<std::byte> bytes =
             _object ? _object->getByteStream() : _rawBytes;
 
         std::uint32_t len = static_cast<std::uint32_t>(bytes.size());
-        out.write(reinterpret_cast<const char*>(&len), sizeof(len));
+        write_u32_le(out, len);
 
         if (len > 0) {
             out.write(reinterpret_cast<const char*>(bytes.data()), len);
+            if (!out) throw std::runtime_error("I/O write error (xobject bytes)");
         }
     }
 
     void XObjectFile::deserialize(std::istream& in)  {
+        // Read metadata and the serialized byte blob. Use the checked helpers
+        // for consistent error reporting on read failures.
         read_string(in, _name);
         read_string(in, _fullPath);
         read_string(in, _relativePath);
 
         std::uint8_t typeVal{};
         std::uint8_t resVal{};
-        in.read(reinterpret_cast<char*>(&typeVal), sizeof(typeVal));
-        in.read(reinterpret_cast<char*>(&resVal), sizeof(resVal));
+        read_u8(in, typeVal);
+        read_u8(in, resVal);
 
         _type = static_cast<FileType>(typeVal);
         _resourceKind = static_cast<ResourceKind>(resVal);
 
         std::uint32_t len{};
-        in.read(reinterpret_cast<char*>(&len), sizeof(len));
+        read_u32_le(in, len);
 
         _rawBytes.resize(len);
         if (len > 0) {
             in.read(reinterpret_cast<char*>(_rawBytes.data()), len);
+            if (!in) throw std::runtime_error("I/O read error (xobject bytes)");
         }
     }
 
@@ -264,11 +345,11 @@ namespace vfs {
         std::uint8_t typeVal = static_cast<std::uint8_t>(_type);
         std::uint8_t resVal = static_cast<std::uint8_t>(_resourceKind);
 
-        out.write(reinterpret_cast<const char*>(&typeVal), sizeof(typeVal));
-        out.write(reinterpret_cast<const char*>(&resVal), sizeof(resVal));
+        write_u8(out, typeVal);
+        write_u8(out, resVal);
 
         std::uint32_t count = static_cast<std::uint32_t>(dict.size());
-        out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        write_u32_le(out, count);
 
         for (auto& [key, value] : dict) {
             write_string(out, key);
@@ -277,9 +358,11 @@ namespace vfs {
             auto bytes = TypeRegistry::instance().serialize(types.at(key), value);
 
             std::uint32_t len = static_cast<std::uint32_t>(bytes.size());
-            out.write(reinterpret_cast<const char*>(&len), sizeof(len));
-            if (len > 0)
+            write_u32_le(out, len);
+            if (len > 0) {
                 out.write(reinterpret_cast<const char*>(bytes.data()), len);
+                if (!out) throw std::runtime_error("I/O write error (dict value bytes)");
+            }
         }
     }
 
@@ -290,14 +373,14 @@ namespace vfs {
 
         std::uint8_t typeVal{};
         std::uint8_t resVal{};
-        in.read(reinterpret_cast<char*>(&typeVal), sizeof(typeVal));
-        in.read(reinterpret_cast<char*>(&resVal), sizeof(resVal));
+        read_u8(in, typeVal);
+        read_u8(in, resVal);
 
         _type = static_cast<FileType>(typeVal);
         _resourceKind = static_cast<ResourceKind>(resVal);
 
         std::uint32_t count{};
-        in.read(reinterpret_cast<char*>(&count), sizeof(count));
+        read_u32_le(in, count);
 
         dict.clear();
         types.clear();
@@ -310,11 +393,13 @@ namespace vfs {
             read_string(in, typeName);
 
             std::uint32_t len{};
-            in.read(reinterpret_cast<char*>(&len), sizeof(len));
+            read_u32_le(in, len);
 
             std::vector<std::byte> bytes(len);
-            if (len > 0)
+            if (len > 0) {
                 in.read(reinterpret_cast<char*>(bytes.data()), len);
+                if (!in) throw std::runtime_error("I/O read error (dict value bytes)");
+            }
 
             std::any value = TypeRegistry::instance().deserialize(
                 typeName, std::span<const std::byte>(bytes));

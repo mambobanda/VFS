@@ -12,6 +12,17 @@
 
 namespace vfs {
 
+// Directory represents a node in the VFS directory tree. It owns its
+// child Directory and File nodes via unique_ptr. The public API is
+// intentionally small and provides operations to add/remove/find
+// children, and to serialize/deserialize the subtree for persistence.
+//
+// Important notes:
+// - add_directory/add_file return raw pointers to the stored child; the
+//   Directory retains ownership.
+// - remove_directory/remove_file return the removed unique_ptr so the
+//   caller (e.g., VirtualFileSystem) can update caches and release
+//   resources in a controlled manner.
 class Directory {
 public:
     Directory(std::string name = "/", Directory* parent = nullptr);
@@ -34,9 +45,9 @@ public:
 
     std::optional<File*> find_file(const std::string& name);
 
-    bool remove_directory(const std::string& name);
+    std::unique_ptr<Directory> remove_directory(const std::string& name);
 
-    bool remove_file(const std::string& name);
+    std::unique_ptr<File> remove_file(const std::string& name);
 
     void serialize(std::ostream& out) const;
 

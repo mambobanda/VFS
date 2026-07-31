@@ -9,6 +9,13 @@
 
 namespace vfs {
 
+// TypeRegistry holds custom serializers/deserializers for arbitrary
+// value types stored inside DictionaryFile instances. This allows the
+// VFS to store typed key/value pairs where the type system is driven
+// by registered type names (e.g. "int", "string").
+//
+// Register a type with register_type(name, serializer, deserializer).
+// Serializer: std::any -> bytes. Deserializer: bytes -> std::any.
 class TypeRegistry {
 public:
     using Serializer   = std::function<std::vector<std::byte>(const std::any&)>;

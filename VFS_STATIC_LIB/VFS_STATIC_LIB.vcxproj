@@ -154,6 +154,7 @@
     <ClInclude Include="vfs_default_registry.hpp" />
     <ClInclude Include="vfs_directory.hpp" />
     <ClInclude Include="vfs_file.hpp" />
+    <ClInclude Include="vfs_helpers.hpp" />
     <ClInclude Include="vfs_path.hpp" />
     <ClInclude Include="vfs_type_registry.hpp" />
     <ClInclude Include="vfs_vfs.hpp" />

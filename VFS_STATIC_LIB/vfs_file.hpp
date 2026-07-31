@@ -15,21 +15,45 @@
 
 namespace vfs {
 
+// FileType enumerates conceptual types. Files stored in directories are
+// Regular files. (Directory type is reserved and not used directly on
+// File instances but included for completeness.)
 enum class FileType {
     Regular,
     Directory,
     Unknown
 };
 
+// ResourceKind indicates whether file data is stored in-memory in the
+// VFS container, or references an external file path on the host
+// filesystem.
 enum class ResourceKind {
     Memory,
     External
 };
 
+// Low-level helpers for string and integer serialization/deserialization
+// are declared here and defined in vfs_file.cpp. They are intentionally
+// small and throw std::runtime_error on I/O failures so higher-level
+// code can uniformly catch and return error statuses.
 void write_string(std::ostream& out, const std::string& s);
 
 void read_string(std::istream& in, std::string& s);
 
+// Little-endian integer helpers and byte helpers. They throw std::runtime_error on I/O errors.
+void write_u8(std::ostream& out, std::uint8_t v);
+void read_u8(std::istream& in, std::uint8_t& v);
+
+void write_u32_le(std::ostream& out, std::uint32_t v);
+void read_u32_le(std::istream& in, std::uint32_t& v);
+
+void write_u64_le(std::ostream& out, std::uint64_t v);
+void read_u64_le(std::istream& in, std::uint64_t& v);
+
+// Base class for all file types stored in directories. Concrete
+// subclasses are MemoryFile, ExternalFile, XObjectFile and
+// DictionaryFile. File defines a small interface for serialization and
+// byte conversions. Subclasses implement data-specific logic.
 class File {
 public:
     virtual ~File() = default;

@@ -1,13 +1,56 @@
 #include "vfs_vfs.hpp"
+#include <functional>
 
 namespace vfs {
 
+    // Construct an empty VFS. We create a root directory ("/") and a
+    // convenient "home" directory underneath it. The cache is primed
+    // with both entries to allow fast resolves for common paths.
     VirtualFileSystem ::VirtualFileSystem() {
         _root = std::make_unique<Directory>("/");
         _home = _root->add_directory("home");
 
         cache_directory("/", _root.get());
         cache_directory("/home", _home);
+    }
+
+    bool VirtualFileSystem::remove_file(const Path& filePath) {
+        auto dirPath = filePath.parent();
+        auto dirOpt = resolve_directory(dirPath);
+        if (!dirOpt) return false;
+        Directory* dir = *dirOpt;
+        std::string name = filePath.filename();
+        auto removed = dir->remove_file(name);
+        if (!removed) return false;
+        // remove from caches and release resources
+        remove_from_cache(removed->full_path());
+        removed->release_resources();
+        return true;
+    }
+
+    bool VirtualFileSystem::remove_directory(const Path& dirPath) {
+        auto parentPath = dirPath.parent();
+        auto dirOpt = resolve_directory(parentPath);
+        if (!dirOpt) return false;
+        Directory* parent = *dirOpt;
+        std::string name = dirPath.filename();
+        auto removed = parent->remove_directory(name);
+        if (!removed) return false;
+
+        // recursively release resources in removed tree
+        std::function<void(Directory*)> releaseDir = [&](Directory* d) {
+            for (auto& f : d->files()) {
+                f->release_resources();
+            }
+            for (auto& sd : d->subdirectories()) {
+                releaseDir(sd.get());
+            }
+        };
+        releaseDir(removed.get());
+
+        // rebuild full cache to remove any nested entries
+        rebuild_cache();
+        return true;
     }
 
     Directory* VirtualFileSystem::root() const { return _root.get(); }
@@ -114,88 +157,138 @@ namespace vfs {
         return nullptr;
     }
 
+    // Persist the entire VFS to a single file.
+    // Format (high level):
+    // [magic:u32][version:u32][indexOffset:u64][indexSize:u64][directory tree + file bodies][index]
+    // The implementation writes the tree and file bodies first, collects an in-memory index
+    // describing where each file body was written, then appends the index and updates the
+    // header (indexOffset/indexSize). Using an appended index allows fast random access later.
     bool VirtualFileSystem::save_to_disk(const std::string& vfsFilePath) const {
-        std::ofstream out(vfsFilePath, std::ios::binary);
-        if (!out) return false;
+        try {
+            std::ofstream out(vfsFilePath, std::ios::binary);
+            if (!out) return false;
 
-        const std::uint32_t magic = 0x56465332;
-        out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+            // Write a magic number to quickly identify VFS files, followed
+            // by a version number. The loader checks these values and
+            // rejects unknown versions to avoid misinterpretation.
+            const std::uint32_t magic = 0x56465332;
+            const std::uint32_t version = 1;
+            write_u32_le(out, magic);
+            write_u32_le(out, version);
 
-        std::uint64_t indexOffset = 0;
-        std::uint64_t indexSize = 0;
-        out.write(reinterpret_cast<const char*>(&indexOffset), sizeof(indexOffset));
-        out.write(reinterpret_cast<const char*>(&indexSize), sizeof(indexSize));
+            std::uint64_t indexOffset = 0;
+            std::uint64_t indexSize = 0;
+            write_u64_le(out, indexOffset);
+            write_u64_le(out, indexSize);
 
-        VirtualFileSystem* self = const_cast<VirtualFileSystem*>(this);
-        self->_index.clear();
-        self->serialize_with_index(out, _root.get(), "/");
+            // serialize_with_index writes the directory structure and the
+            // file bodies. As it serializes files it records index
+            // entries (offset and length) in _index so we can write a
+            // separate index later.
+            VirtualFileSystem* self = const_cast<VirtualFileSystem*>(this);
+            self->_index.clear();
+            self->serialize_with_index(out, _root.get(), "/");
 
-        indexOffset = static_cast<std::uint64_t>(out.tellp());
+            indexOffset = static_cast<std::uint64_t>(out.tellp());
 
-        std::uint32_t count = static_cast<std::uint32_t>(_index.size());
-        out.write(reinterpret_cast<const char*>(&count), sizeof(count));
+            std::uint32_t count = static_cast<std::uint32_t>(_index.size());
+            write_u32_le(out, count);
 
-        for (const auto& e : _index) {
-            write_string(out, e.fullPath);
-            out.write(reinterpret_cast<const char*>(&e.fileKind), sizeof(e.fileKind));
-            out.write(reinterpret_cast<const char*>(&e.resourceKind), sizeof(e.resourceKind));
-            out.write(reinterpret_cast<const char*>(&e.offset), sizeof(e.offset));
-            out.write(reinterpret_cast<const char*>(&e.length), sizeof(e.length));
+            for (const auto& e : _index) {
+                write_string(out, e.fullPath);
+                write_u8(out, e.fileKind);
+                write_u8(out, e.resourceKind);
+                write_u64_le(out, e.offset);
+                write_u64_le(out, e.length);
+            }
+
+            indexSize = static_cast<std::uint64_t>(out.tellp()) - indexOffset;
+
+            out.seekp(8, std::ios::beg); // after magic (4) + version (4)
+            write_u64_le(out, indexOffset);
+            write_u64_le(out, indexSize);
+
+            return true;
         }
-
-        indexSize = static_cast<std::uint64_t>(out.tellp()) - indexOffset;
-
-        out.seekp(sizeof(magic), std::ios::beg);
-        out.write(reinterpret_cast<const char*>(&indexOffset), sizeof(indexOffset));
-        out.write(reinterpret_cast<const char*>(&indexSize), sizeof(indexSize));
-
-        return true;
+        catch (const std::exception&) {
+            // Any error during serialization or I/O aborts and returns false.
+            return false;
+        }
     }
 
+    // Load VFS from disk. This rebuilds the in-memory directory tree
+    // and the in-memory caches. The loader validates the magic/version
+    // and then deserializes the tree. It also reads the appended index
+    // and stores it; the index can be used to implement lazy reads or
+    // random access in the future.
     bool VirtualFileSystem::load_from_disk(const std::string& vfsFilePath) {
-        std::ifstream in(vfsFilePath, std::ios::binary);
-        if (!in) return false;
 
-        std::uint32_t magic{};
-        in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
-        if (magic != 0x56465332) return false;
+        try {
+            std::ifstream in(vfsFilePath, std::ios::binary);
+            if (!in) return false;
 
-        std::uint64_t indexOffset{};
-        std::uint64_t indexSize{};
-        in.read(reinterpret_cast<char*>(&indexOffset), sizeof(indexOffset));
-        in.read(reinterpret_cast<char*>(&indexSize), sizeof(indexSize));
 
-        _root = std::make_unique<Directory>("/");
-        _root->deserialize(in);
+            // Validate header
+            std::uint32_t magic{};
+            read_u32_le(in, magic);
+            if (magic != 0x56465332) return false;
 
-        _home = nullptr;
-        for (auto& d : _root->subdirectories()) {
-            if (d->name() == "home") {
-                _home = d.get();
-                break;
+            std::uint32_t version{};
+            read_u32_le(in, version);
+            if (version != 1) return false; // unknown file format
+
+            std::uint64_t indexOffset{};
+            std::uint64_t indexSize{};
+            read_u64_le(in, indexOffset);
+            read_u64_le(in, indexSize);
+
+            // Deserialize the directory tree (recursively). The Directory
+            // implementation will instantiate File subclass instances and
+            // call their deserialize methods. After this step the in-memory
+            // tree is reconstructed.
+            _root = std::make_unique<Directory>("/");
+            _root->deserialize(in);
+
+            _home = nullptr;
+            for (auto& d : _root->subdirectories()) {
+                if (d->name() == "home") {
+                    _home = d.get();
+                    break;
+                }
             }
-        }
-        if (!_home) {
-            _home = _root->add_directory("home");
-        }
+            if (!_home) {
+                _home = _root->add_directory("home");
+            }
 
-        _index.clear();
-        in.seekg(indexOffset, std::ios::beg);
-        std::uint32_t count{};
-        in.read(reinterpret_cast<char*>(&count), sizeof(count));
-        _index.reserve(count);
-        for (std::uint32_t i = 0; i < count; ++i) {
-            VfsIndexEntryInternal e;
-            read_string(in, e.fullPath);
-            in.read(reinterpret_cast<char*>(&e.fileKind), sizeof(e.fileKind));
-            in.read(reinterpret_cast<char*>(&e.resourceKind), sizeof(e.resourceKind));
-            in.read(reinterpret_cast<char*>(&e.offset), sizeof(e.offset));
-            in.read(reinterpret_cast<char*>(&e.length), sizeof(e.length));
-            _index.push_back(e);
-        }
+            // Read the index table. Each entry points to a file body in
+            // the serialized blob which can be used for random access
+            // without walking the entire tree. We store the index in
+            // memory so callers may inspect it later.
+            _index.clear();
+            in.seekg(indexOffset, std::ios::beg);
+            std::uint32_t count{};
+            read_u32_le(in, count);
+            _index.reserve(count);
+            for (std::uint32_t i = 0; i < count; ++i) {
+                VfsIndexEntryInternal e;
+                read_string(in, e.fullPath);
+                read_u8(in, e.fileKind);
+                read_u8(in, e.resourceKind);
+                read_u64_le(in, e.offset);
+                read_u64_le(in, e.length);
+                _index.push_back(e);
+            }
 
-        rebuild_cache();
-        return true;
+            // Rebuild caches to reflect the freshly-loaded tree. This
+            // populates _dirCache/_fileCache for fast resolves. If we
+            // later introduce lazy loading of file bodies we must ensure
+            // caches remain consistent with that behavior.
+            rebuild_cache();
+            return true;
+        }
+        catch (const std::exception&) {
+            return false;
+        }
     }
 
     void VirtualFileSystem::clear() {
@@ -276,8 +369,8 @@ namespace vfs {
         write_string(out, dir->name());
         std::uint32_t dirCount = static_cast<std::uint32_t>(dir->subdirectories().size());
         std::uint32_t fileCount = static_cast<std::uint32_t>(dir->files().size());
-        out.write(reinterpret_cast<const char*>(&dirCount), sizeof(dirCount));
-        out.write(reinterpret_cast<const char*>(&fileCount), sizeof(fileCount));
+        write_u32_le(out, dirCount);
+        write_u32_le(out, fileCount);
 
         for (auto& d : dir->subdirectories()) {
             std::string childPath = (basePath == "/")
@@ -297,7 +390,7 @@ namespace vfs {
 
             std::uint64_t offset = static_cast<std::uint64_t>(out.tellp());
 
-            out.write(reinterpret_cast<const char*>(&fileKind), sizeof(fileKind));
+            write_u8(out, fileKind);
             f->serialize(out);
 
             std::uint64_t end = static_cast<std::uint64_t>(out.tellp());
