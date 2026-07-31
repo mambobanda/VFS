@@ -1,0 +1,29 @@
+#pragma once
+#include <string>
+#include <vector>
+#include <sstream>
+
+namespace vfs {
+
+class Path {
+public:
+    Path() = default;
+    explicit Path(std::string p);
+
+    const std::string& string() const;
+
+    std::vector<std::string> components() const;
+
+    std::string filename() const;
+
+    Path parent() const;
+
+    static Path join(const Path& base, const std::string& name);
+
+    std::string extension() const;
+
+private:
+    std::string _path;
+};
+
+} // namespace vfs

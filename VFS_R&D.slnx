@@ -1,0 +1,9 @@
+<Solution>
+  <Configurations>
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="vfs_cli/vfs_cli.vcxproj" Id="df117c29-e33a-4fd5-9666-e3fc9ad53262" />
+  <Project Path="VFS_R&amp;D/VFS_R&amp;D.vcxproj" Id="54166cf5-31f5-4d90-ae16-adf74e8e3c28" />
+  <Project Path="VFS_STATIC_LIB/VFS_STATIC_LIB.vcxproj" Id="19f98276-bd9c-46bf-bce7-ae3d67bea1fa" />
+</Solution>
