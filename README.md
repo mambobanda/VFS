@@ -1,5 +1,3 @@
-Draft ready — I prepared a README.md for VFS below. If this looks good I can commit it to the repo for you.
-
 ```markdown name=README.md url=https://github.com/mambobanda/VFS/blob/master/README.md
 # VFS — Virtual File System (C++)
 
