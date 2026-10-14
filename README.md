@@ -114,13 +114,3 @@ https://github.com/mambobanda/VFS/blob/master/vfs_unit_test.cpp
   - Run the unit test exe as part of CI to detect regressions.
 - If you want an API section in the README, I can extract and document the public API from key headers (vfs_vfs.hpp, vfs_file.hpp, vfs_path.hpp) with short code snippets.
 
-## License & Contribution
-- There is no LICENSE file in the repo root. If you intend to publish or accept contributions, add a LICENSE (e.g., MIT, Apache-2.0) and a short CONTRIBUTING.md describing how to build and run tests.
-- Please confirm the license you want included and I can add it.
-
----
-
-*This README was generated from a repository scan and example code (vfs_unit_test.cpp). Please review for accuracy and update project-specific build flags, target SDK versions, and any missing dependency notes.*
-```
-
-Would you like me to commit this README.md directly to the VFS repository (commit message "Add generated README.md")?
